@@ -1,9 +1,3 @@
-"""DeepSeek provider adapter — uses the OpenAI SDK with a custom base_url.
-
-For `deepseek-reasoner`, captures `choice.message.reasoning_content` into
-`ProviderResult.reasoning`. Only `deepseek-reasoner` exposes thinking content.
-"""
-
 from __future__ import annotations
 
 import time

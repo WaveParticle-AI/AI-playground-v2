@@ -1,10 +1,3 @@
-"""Qwen provider adapter via DashScope International (OpenAI-compatible).
-
-Uses the OpenAI SDK with `base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"`.
-For thinking-capable models, passes `extra_body={"enable_thinking": True}` and
-captures `reasoning_content` from the response message.
-"""
-
 from __future__ import annotations
 
 import time

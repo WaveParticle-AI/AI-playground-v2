@@ -8,6 +8,7 @@ import streamlit as st
 
 from playground.characters import Character, list_characters
 from playground.providers import PROVIDERS
+from playground.story import StoryArc, StoryState, load_arc
 
 
 PROVIDER_ORDER = ["openai", "deepseek", "gemini", "qwen"]
@@ -25,9 +26,12 @@ class SidebarState:
     rag_enabled: bool
     mood_enabled: bool
     rag_top_k: int
-    mode: str  # "single" | "conversation"
     classifier_provider: str | None
     classifier_model: str | None
+    story_arc: StoryArc | None
+    story_state: StoryState | None
+    persona_edited: str | None = None
+    voice_edited: str | None = None
 
 
 def _all_model_options() -> list[str]:
@@ -75,6 +79,43 @@ def render() -> SidebarState:
         character = next(c for c in chars if c.name == picked)
     else:
         st.sidebar.info("No characters found under `characters/`.")
+
+    persona_edited = None
+    voice_edited = None
+    if character is not None:
+        persona_key = f"persona_{character.id}"
+        voice_key = f"voice_{character.id}"
+        if persona_key not in st.session_state:
+            st.session_state[persona_key] = character.persona
+        if voice_key not in st.session_state:
+            st.session_state[voice_key] = character.voice_reminder
+        with st.sidebar.expander("Edit character prompt", expanded=False):
+            st.session_state[persona_key] = st.text_area(
+                "Persona",
+                value=st.session_state[persona_key],
+                height=200,
+                key=f"persona_editor_{character.id}",
+            )
+            st.session_state[voice_key] = st.text_area(
+                "Voice reminder",
+                value=st.session_state[voice_key],
+                height=100,
+                key=f"voice_editor_{character.id}",
+            )
+            cols = st.columns(2)
+            if cols[0].button("Reset", key=f"reset_prompt_{character.id}"):
+                st.session_state[persona_key] = character.persona
+                st.session_state[voice_key] = character.voice_reminder
+                st.rerun()
+            if cols[1].button("Save", key=f"save_prompt_{character.id}"):
+                from pathlib import Path
+                char_dir = Path("characters") / character.id
+                char_dir.mkdir(parents=True, exist_ok=True)
+                (char_dir / "persona.md").write_text(st.session_state[persona_key], encoding="utf-8")
+                (char_dir / "voice_reminder.md").write_text(st.session_state[voice_key], encoding="utf-8")
+                st.success("Saved to files.")
+        persona_edited = st.session_state[persona_key]
+        voice_edited = st.session_state[voice_key]
 
     st.sidebar.header("Models to compare")
     options = _all_model_options()
@@ -135,14 +176,15 @@ def render() -> SidebarState:
         else:
             st.sidebar.info("Add at least one API key to enable mood classification.")
 
-    st.sidebar.header("Mode")
-    mode_pick = st.sidebar.radio(
-        "Mode",
-        ["Single-shot", "Conversation"],
-        index=0,
-        label_visibility="collapsed",
-    )
-    mode = "single" if mode_pick == "Single-shot" else "conversation"
+    story_arc: StoryArc | None = None
+    story_state: StoryState | None = None
+    if character is not None:
+        story_arc = load_arc(character.id)
+        if story_arc is not None and story_arc.tasks:
+            ss_key = f"story_state_{character.id}"
+            if ss_key not in st.session_state:
+                st.session_state[ss_key] = StoryState()
+            story_state = st.session_state[ss_key]
 
     return SidebarState(
         api_keys=api_keys,
@@ -154,7 +196,10 @@ def render() -> SidebarState:
         rag_enabled=rag_enabled,
         mood_enabled=mood_enabled,
         rag_top_k=rag_top_k,
-        mode=mode,
         classifier_provider=classifier_provider,
         classifier_model=classifier_model,
+        story_arc=story_arc,
+        story_state=story_state,
+        persona_edited=persona_edited,
+        voice_edited=voice_edited,
     )

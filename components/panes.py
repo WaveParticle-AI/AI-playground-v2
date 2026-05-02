@@ -9,8 +9,8 @@ import streamlit as st
 from playground.rag import Chunk
 
 
-def reasoning_pane(reasoning: str) -> None:
-    with st.expander("Reasoning / thinking", expanded=False):
+def reasoning_pane(reasoning: str, expanded: bool = True) -> None:
+    with st.expander("Chain of thought / reasoning", expanded=expanded):
         if reasoning:
             st.markdown(reasoning)
         else:

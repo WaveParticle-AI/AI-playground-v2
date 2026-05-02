@@ -1,5 +1,3 @@
-"""Provider Protocol and shared result type for all LLM adapters."""
-
 from dataclasses import dataclass, field
 from typing import Protocol
 

@@ -1,9 +1,3 @@
-"""Gemini provider adapter using the google-genai SDK.
-
-Translates the chat-style `messages` list into the SDK's content format,
-collapses consecutive system messages into the model's `system_instruction`,
-and splits response parts into `text` (non-thought) and `reasoning` (thought).
-"""
 
 from __future__ import annotations
 

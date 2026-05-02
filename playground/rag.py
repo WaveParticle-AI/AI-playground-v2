@@ -121,8 +121,6 @@ def retrieve(query: str, character_id: str, k: int = 4) -> list[Chunk]:
     top_idx = np.argsort(sims)[::-1][:k]
     out: list[Chunk] = []
     for i in top_idx:
-        if sims[i] <= 0:
-            continue
         c = chunks[int(i)]
         out.append(
             Chunk(

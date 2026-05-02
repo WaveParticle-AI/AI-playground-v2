@@ -14,6 +14,7 @@ via `inject_marker`.
 
 from playground.characters import Character
 from playground.rag import Chunk, format_chunks_for_prompt
+from playground.story import StoryArc, StoryState, build_reminders_block
 from playground.thinking_modes import inject_marker
 
 
@@ -36,10 +37,28 @@ def assemble(
     rag_chunks: list[Chunk] | None,
     mood: dict | None,
     thinking_mode: str,
+    story_arc: StoryArc | None = None,
+    story_state: StoryState | None = None,
 ) -> list[dict]:
     messages: list[dict] = []
 
-    messages.append({"role": "system", "content": character.persona})
+    persona = character.persona
+    voice = character.voice_reminder
+    if story_arc is not None and story_state is not None:
+        if story_arc.persona_override:
+            persona = story_arc.persona_override
+        if story_arc.voice_override:
+            voice = story_arc.voice_override
+
+    messages.append({"role": "system", "content": persona})
+
+    if story_arc is not None and story_state is not None:
+        messages.append(
+            {
+                "role": "system",
+                "content": build_reminders_block(arc=story_arc, state=story_state),
+            }
+        )
 
     if rag_chunks:
         rag_text = format_chunks_for_prompt(rag_chunks)
@@ -58,6 +77,6 @@ def assemble(
 
     messages.append({"role": "user", "content": user_message})
 
-    messages.append({"role": "system", "content": character.voice_reminder})
+    messages.append({"role": "system", "content": voice})
 
     return inject_marker(messages, thinking_mode)

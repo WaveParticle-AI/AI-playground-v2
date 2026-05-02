@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import streamlit as st
 
-from components.comparison import render_columns
-from components.panes import mood_panel
+from components.comparison import THINKING_MODE_BADGES
+from components.panes import (
+    assembled_prompt_pane,
+    mood_panel,
+    rag_pane,
+    reasoning_pane,
+)
 from components.sidebar import render as render_sidebar
 from playground import mood as mood_mod
 from playground.prompt_assembly import assemble
 from playground.rag import retrieve
 from playground.runner import ProviderSelection, run_parallel
+from playground.story import generate_tasks
 
 
 st.set_page_config(page_title="Waveparticle Playground", layout="wide")
@@ -52,15 +58,25 @@ def _per_column_assemble(
     mood_dict,
 ):
     history = []
-    if state.mode == "conversation" and column_index < len(st.session_state["history"]):
+    if column_index < len(st.session_state["history"]):
         history = list(st.session_state["history"][column_index])
+    character = state.character
+    if state.persona_edited is not None or state.voice_edited is not None:
+        from dataclasses import replace
+        character = replace(
+            character,
+            persona=state.persona_edited if state.persona_edited is not None else character.persona,
+            voice_reminder=state.voice_edited if state.voice_edited is not None else character.voice_reminder,
+        )
     return assemble(
-        character=state.character,
+        character=character,
         user_message=user_message,
         history=history,
         rag_chunks=rag_chunks if state.rag_enabled else None,
         mood=mood_dict if state.mood_enabled else None,
         thinking_mode=state.thinking_mode,
+        story_arc=state.story_arc,
+        story_state=state.story_state,
     )
 
 
@@ -96,12 +112,7 @@ def _run_all(state, user_message: str):
 
     results = []
     if assembled_per_col:
-        # Each column may have a slightly different message list (history per
-        # column in conversation mode). Run them sequentially through a small
-        # threadpool by zipping selections with their messages via run_parallel
-        # one at a time when histories diverge; in single-shot mode they're
-        # identical, so we can fan out together.
-        if state.mode == "single" or len({tuple((m["role"], m["content"]) for m in msgs) for msgs in assembled_per_col}) == 1:
+        if len({tuple((m["role"], m["content"]) for m in msgs) for msgs in assembled_per_col}) == 1:
             results = run_parallel(
                 selections,
                 assembled_per_col[0],
@@ -124,6 +135,228 @@ def _run_all(state, user_message: str):
     return mood_dict, rag_chunks, list(zip(assembled_per_col, results))
 
 
+def _render_story_setup(state) -> None:
+    arc = state.story_arc
+    char = state.character
+    st.subheader(f"Begin a project with {char.name}")
+    st.markdown(
+        f"**{char.name}** is already inside his own work — *{arc.story_goal}*. "
+        f"Name your project below; the two of you will move in parallel from "
+        f"there."
+    )
+
+    goal = st.text_input(
+        "Your project goal",
+        key="setup_goal",
+        placeholder="e.g. Review key algorithm concepts",
+    )
+
+    classifier_key = state.api_keys.get(state.classifier_provider or "", "")
+    can_generate = bool(
+        state.classifier_provider and state.classifier_model and classifier_key
+    )
+    gen_help = (
+        f"Uses your mood-classifier provider "
+        f"(`{state.classifier_provider}:{state.classifier_model}`) to draft "
+        f"a 5-step plan you can edit."
+        if can_generate else
+        "Enable the mood classifier in the sidebar (and set its API key) to "
+        "use AI-generated tasks."
+    )
+
+    btn_cols = st.columns([1, 1, 4])
+    if btn_cols[0].button(
+        "Generate tasks ✨",
+        disabled=not can_generate or not goal.strip(),
+        help=gen_help,
+        key="setup_generate_tasks",
+    ):
+        with st.spinner(f"Drafting tasks for “{goal.strip()}”..."):
+            tasks = generate_tasks(
+                goal=goal.strip(),
+                character_name=char.name,
+                provider_name=state.classifier_provider,
+                model=state.classifier_model,
+                api_key=classifier_key,
+            )
+        if tasks:
+            st.session_state["setup_tasks_raw"] = "\n".join(tasks)
+            st.rerun()
+        else:
+            st.warning(
+                "Task generation returned nothing — check the classifier "
+                "provider/key, or type tasks yourself."
+            )
+
+    tasks_raw = st.text_area(
+        "Your tasks (one per line — leave blank to let them emerge through "
+        "the chat)",
+        key="setup_tasks_raw",
+        placeholder="step 1\nstep 2\nstep 3",
+        height=160,
+    )
+
+    if btn_cols[1].button("Begin", type="primary", disabled=not goal.strip()):
+        ss = state.story_state
+        ss.user_goal = goal.strip()
+        ss.user_tasks = [
+            line.strip() for line in tasks_raw.splitlines() if line.strip()
+        ]
+        ss.user_task_idx = 0
+        ss.char_task_idx = 0
+        st.session_state[f"story_state_{char.id}"] = ss
+        n_cols = max(1, len(state.selected_models))
+        st.session_state["history"] = [[] for _ in range(n_cols)]
+        st.session_state["last_run"] = None
+        st.rerun()
+
+
+def _render_arc_panel(state, n_cols: int) -> None:
+    arc = state.story_arc
+    ss = state.story_state
+    char_name = state.character.name
+
+    with st.container(border=True):
+        head_cols = st.columns([4, 1, 1])
+        head_cols[0].markdown(f"**Project**: {ss.user_goal}")
+        if head_cols[1].button("Reset chat", help="Clear conversation, keep goal"):
+            st.session_state["history"] = [[] for _ in range(n_cols)]
+            st.session_state["last_run"] = None
+            st.rerun()
+        if head_cols[2].button("Reset goal", help="Start a new project"):
+            ss.user_goal = ""
+            ss.user_tasks = []
+            ss.user_task_idx = 0
+            ss.char_task_idx = 0
+            st.session_state[f"story_state_{state.character.id}"] = ss
+            st.session_state["history"] = [[] for _ in range(n_cols)]
+            st.session_state["last_run"] = None
+            st.rerun()
+
+        arc_cols = st.columns(2)
+        with arc_cols[0]:
+            st.caption("Your tasks")
+            if ss.user_tasks:
+                for i, t in enumerate(ss.user_tasks):
+                    marker = "▶" if i == ss.user_task_idx else "—"
+                    st.markdown(f"{marker} `{i}` {t}")
+                btns = st.columns(2)
+                if btns[0].button("◀ Prev", key="user_prev_task"):
+                    ss.user_task_idx = max(0, ss.user_task_idx - 1)
+                    st.session_state[f"story_state_{state.character.id}"] = ss
+                    st.rerun()
+                if btns[1].button("Next ▶", key="user_next_task"):
+                    ss.user_task_idx = min(
+                        len(ss.user_tasks) - 1, ss.user_task_idx + 1
+                    )
+                    st.session_state[f"story_state_{state.character.id}"] = ss
+                    st.rerun()
+            else:
+                st.caption("(no explicit task list — letting the chat shape it)")
+
+        with arc_cols[1]:
+            st.caption(f"{char_name}'s arc — {arc.story_goal}")
+            for i, t in enumerate(arc.tasks):
+                marker = "▶" if i == ss.char_task_idx else "—"
+                st.markdown(f"{marker} `{i}` {t}")
+            btns = st.columns(2)
+            if btns[0].button("◀ Prev", key="char_prev_task"):
+                ss.char_task_idx = max(0, ss.char_task_idx - 1)
+                st.session_state[f"story_state_{state.character.id}"] = ss
+                st.rerun()
+            if btns[1].button("Next ▶", key="char_next_task"):
+                ss.char_task_idx = min(arc.n_tasks - 1, ss.char_task_idx + 1)
+                st.session_state[f"story_state_{state.character.id}"] = ss
+                st.rerun()
+
+
+def _render_story_chat(state, n_cols: int) -> None:
+    _render_arc_panel(state, n_cols)
+
+    if not state.selected_models:
+        st.error("Pick at least one model in the sidebar to begin.")
+        return
+
+    ss = state.story_state
+    last = st.session_state.get("last_run") or {}
+    last_paired = last.get("paired") or []
+    last_results = [r for _, r in last_paired] if last_paired else []
+    last_assembled = [a for a, _ in last_paired] if last_paired else []
+    last_rag = last.get("rag_chunks") or []
+    story_caption = (
+        f"story: char-task `{ss.char_task_idx}` · user-task `{ss.user_task_idx}`"
+    )
+
+    cols = st.columns(n_cols)
+    for i, ((pname, model), col) in enumerate(zip(state.selected_models, cols)):
+        with col:
+            st.markdown(f"### `{pname}:{model}`")
+            st.caption(story_caption)
+            history = (
+                st.session_state["history"][i]
+                if i < len(st.session_state["history"]) else []
+            )
+            if not history:
+                st.info(f"Speak to {state.character.name} below to begin.")
+            for turn in history:
+                role = turn["role"]
+                avatar = "🧪" if role == "assistant" else None
+                with st.chat_message(role, avatar=avatar):
+                    st.markdown(turn["content"])
+
+            r = last_results[i] if i < len(last_results) else None
+            if r:
+                if r.error:
+                    st.error(r.error)
+                badge = THINKING_MODE_BADGES.get(
+                    state.thinking_mode, state.thinking_mode
+                )
+                meta = st.columns(2)
+                meta[0].caption(f"thinking-mode: `{badge}`")
+                meta[1].caption(f"latency: `{r.latency_ms} ms`")
+                usage = r.token_usage or {}
+                st.caption(
+                    f"tokens — prompt: {usage.get('prompt', 0)}, "
+                    f"completion: {usage.get('completion', 0)}, "
+                    f"total: {usage.get('total', 0)}"
+                )
+                reasoning_pane(r.reasoning or "", expanded=False)
+                rag_pane(last_rag)
+                if i < len(last_assembled):
+                    assembled_prompt_pane(last_assembled[i])
+
+    user_msg = st.chat_input(
+        f"Talk to {state.character.name} about “{ss.user_goal}”."
+    )
+    if user_msg and user_msg.strip():
+        with st.spinner("Models running in parallel..."):
+            mood_dict, rag_chunks, paired = _run_all(state, user_msg.strip())
+        st.session_state["last_run"] = {
+            "user_message": user_msg.strip(),
+            "mood": mood_dict,
+            "rag_chunks": rag_chunks,
+            "paired": paired,
+            "selections": state.selected_models,
+            "thinking_mode": state.thinking_mode,
+            "story_caption": story_caption,
+        }
+        for i, (_, result) in enumerate(paired):
+            while i >= len(st.session_state["history"]):
+                st.session_state["history"].append([])
+            st.session_state["history"][i].append(
+                {"role": "user", "content": user_msg.strip()}
+            )
+            if not result.error and result.text:
+                st.session_state["history"][i].append(
+                    {"role": "assistant", "content": result.text}
+                )
+        st.rerun()
+
+    if last and last.get("mood"):
+        st.divider()
+        mood_panel(last["mood"])
+
+
 def main() -> None:
     state = render_sidebar()
 
@@ -136,95 +369,22 @@ def main() -> None:
         )
         return
 
+    if state.story_arc is None or state.story_state is None:
+        st.warning(
+            f"`{state.character.id}` has no `story.json` (or it's empty). "
+            f"Add one under `characters/{state.character.id}/` with a "
+            f"`story_goal` and a non-empty `tasks` list."
+        )
+        return
+
     n_cols = max(1, len(state.selected_models))
     _ensure_session_defaults(n_cols)
 
-    if state.mode == "conversation":
-        if len(st.session_state["history"]) != n_cols:
-            st.session_state["history"] = [[] for _ in range(n_cols)]
-        cols_h = st.columns(n_cols) if n_cols else None
-        if cols_h is not None:
-            for i, (pname, model) in enumerate(state.selected_models):
-                with cols_h[i]:
-                    with st.expander(f"History — `{pname}:{model}`", expanded=False):
-                        h = st.session_state["history"][i]
-                        if not h:
-                            st.caption("(empty)")
-                        for turn in h:
-                            st.markdown(f"**{turn['role']}**: {turn['content']}")
-        if st.button("Clear conversation history"):
-            st.session_state["history"] = [[] for _ in range(n_cols)]
-            st.rerun()
+    if not state.story_state.user_goal:
+        _render_story_setup(state)
+        return
 
-    user_message = st.text_area(
-        "Your message",
-        height=140,
-        placeholder="Speak to the character. They'll receive a fully assembled prompt.",
-    )
-
-    send = st.button("Send", type="primary")
-
-    if "last_run" not in st.session_state:
-        st.session_state["last_run"] = None
-
-    if send and user_message.strip():
-        if not state.selected_models:
-            st.error("Pick at least one model in the sidebar.")
-            return
-        with st.spinner("Calling models in parallel..."):
-            mood_dict, rag_chunks, paired = _run_all(state, user_message)
-        st.session_state["last_run"] = {
-            "user_message": user_message,
-            "mood": mood_dict,
-            "rag_chunks": rag_chunks,
-            "paired": paired,
-            "selections": state.selected_models,
-            "thinking_mode": state.thinking_mode,
-        }
-        if state.mode == "conversation":
-            for i, (_, result) in enumerate(paired):
-                if i >= len(st.session_state["history"]):
-                    st.session_state["history"].append([])
-                st.session_state["history"][i].append(
-                    {"role": "user", "content": user_message}
-                )
-                if not result.error and result.text:
-                    st.session_state["history"][i].append(
-                        {"role": "assistant", "content": result.text}
-                    )
-
-    last = st.session_state.get("last_run")
-    if last:
-        def _rerun_one(column_index: int) -> None:
-            sel_p, sel_m = last["selections"][column_index]
-            sel = ProviderSelection(
-                provider_name=sel_p, model=sel_m, api_key=state.api_keys.get(sel_p, "")
-            )
-            msgs = last["paired"][column_index][0]
-            with st.spinner(f"Re-running `{sel_p}:{sel_m}`..."):
-                results = run_parallel(
-                    [sel], msgs, state.temperature, state.max_tokens
-                )
-            new_paired = list(last["paired"])
-            new_paired[column_index] = (msgs, results[0])
-            last["paired"] = new_paired
-            st.session_state["last_run"] = last
-            st.rerun()
-
-        results_only = [r for _, r in last["paired"]]
-        assembled_for_first = (
-            last["paired"][0][0] if last["paired"] else []
-        )
-        render_columns(
-            selections=last["selections"],
-            results=results_only,
-            thinking_mode=last["thinking_mode"],
-            rag_chunks=last["rag_chunks"],
-            assembled_messages=assembled_for_first,
-            rerun_callback=_rerun_one,
-        )
-        st.divider()
-        mood_panel(last["mood"])
+    _render_story_chat(state, n_cols)
 
 
 if __name__ == "__main__":
