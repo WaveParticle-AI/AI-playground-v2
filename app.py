@@ -68,6 +68,14 @@ def _per_column_assemble(
             persona=state.persona_edited if state.persona_edited is not None else character.persona,
             voice_reminder=state.voice_edited if state.voice_edited is not None else character.voice_reminder,
         )
+    story_arc = state.story_arc
+    if story_arc is not None and (state.story_persona_edited is not None or state.story_voice_edited is not None):
+        from dataclasses import replace
+        story_arc = replace(
+            story_arc,
+            persona_override=state.story_persona_edited if state.story_persona_edited is not None else story_arc.persona_override,
+            voice_override=state.story_voice_edited if state.story_voice_edited is not None else story_arc.voice_override,
+        )
     return assemble(
         character=character,
         user_message=user_message,
@@ -75,7 +83,7 @@ def _per_column_assemble(
         rag_chunks=rag_chunks if state.rag_enabled else None,
         mood=mood_dict if state.mood_enabled else None,
         thinking_mode=state.thinking_mode,
-        story_arc=state.story_arc,
+        story_arc=story_arc,
         story_state=state.story_state,
     )
 

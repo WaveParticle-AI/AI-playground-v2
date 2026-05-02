@@ -11,7 +11,7 @@ from playground.providers import PROVIDERS
 from playground.story import StoryArc, StoryState, load_arc
 
 
-PROVIDER_ORDER = ["openai", "deepseek", "gemini", "qwen"]
+PROVIDER_ORDER = ["openai", "anthropic", "deepseek", "gemini", "qwen"]
 MAX_MODELS = 4
 
 
@@ -32,6 +32,8 @@ class SidebarState:
     story_state: StoryState | None
     persona_edited: str | None = None
     voice_edited: str | None = None
+    story_persona_edited: str | None = None
+    story_voice_edited: str | None = None
 
 
 def _all_model_options() -> list[str]:
@@ -82,7 +84,13 @@ def render() -> SidebarState:
 
     persona_edited = None
     voice_edited = None
+    story_persona_edited = None
+    story_voice_edited = None
     if character is not None:
+        from pathlib import Path
+        char_dir = Path("characters") / character.id
+
+        # Regular persona/voice editing
         persona_key = f"persona_{character.id}"
         voice_key = f"voice_{character.id}"
         if persona_key not in st.session_state:
@@ -108,14 +116,48 @@ def render() -> SidebarState:
                 st.session_state[voice_key] = character.voice_reminder
                 st.rerun()
             if cols[1].button("Save", key=f"save_prompt_{character.id}"):
-                from pathlib import Path
-                char_dir = Path("characters") / character.id
                 char_dir.mkdir(parents=True, exist_ok=True)
                 (char_dir / "persona.md").write_text(st.session_state[persona_key], encoding="utf-8")
                 (char_dir / "voice_reminder.md").write_text(st.session_state[voice_key], encoding="utf-8")
                 st.success("Saved to files.")
         persona_edited = st.session_state[persona_key]
         voice_edited = st.session_state[voice_key]
+
+        # Story persona/voice editing
+        story_persona_path = char_dir / "story_persona.md"
+        story_voice_path = char_dir / "story_voice.md"
+        story_persona_key = f"story_persona_{character.id}"
+        story_voice_key = f"story_voice_{character.id}"
+        if story_persona_key not in st.session_state:
+            st.session_state[story_persona_key] = story_persona_path.read_text(encoding="utf-8") if story_persona_path.is_file() else ""
+        if story_voice_key not in st.session_state:
+            st.session_state[story_voice_key] = story_voice_path.read_text(encoding="utf-8") if story_voice_path.is_file() else ""
+        with st.sidebar.expander("Edit story prompt", expanded=False):
+            st.caption("Overrides used when story mode is active.")
+            st.session_state[story_persona_key] = st.text_area(
+                "Story persona",
+                value=st.session_state[story_persona_key],
+                height=200,
+                key=f"story_persona_editor_{character.id}",
+            )
+            st.session_state[story_voice_key] = st.text_area(
+                "Story voice reminder",
+                value=st.session_state[story_voice_key],
+                height=100,
+                key=f"story_voice_editor_{character.id}",
+            )
+            cols = st.columns(2)
+            if cols[0].button("Reset", key=f"reset_story_prompt_{character.id}"):
+                st.session_state[story_persona_key] = story_persona_path.read_text(encoding="utf-8") if story_persona_path.is_file() else ""
+                st.session_state[story_voice_key] = story_voice_path.read_text(encoding="utf-8") if story_voice_path.is_file() else ""
+                st.rerun()
+            if cols[1].button("Save", key=f"save_story_prompt_{character.id}"):
+                char_dir.mkdir(parents=True, exist_ok=True)
+                (char_dir / "story_persona.md").write_text(st.session_state[story_persona_key], encoding="utf-8")
+                (char_dir / "story_voice.md").write_text(st.session_state[story_voice_key], encoding="utf-8")
+                st.success("Saved story prompt files.")
+        story_persona_edited = st.session_state[story_persona_key]
+        story_voice_edited = st.session_state[story_voice_key]
 
     st.sidebar.header("Models to compare")
     options = _all_model_options()
@@ -202,4 +244,6 @@ def render() -> SidebarState:
         story_state=story_state,
         persona_edited=persona_edited,
         voice_edited=voice_edited,
+        story_persona_edited=story_persona_edited,
+        story_voice_edited=story_voice_edited,
     )

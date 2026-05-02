@@ -1,5 +1,6 @@
 streamlit>=1.40,<2.0
 openai>=1.50
+anthropic>=0.39
 google-genai>=0.3
 python-dotenv>=1.0
 scikit-learn>=1.4
