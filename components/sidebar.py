@@ -30,6 +30,7 @@ class SidebarState:
     classifier_model: str | None
     story_arc: StoryArc | None
     story_state: StoryState | None
+    eval_enabled: bool = False
     persona_edited: str | None = None
     voice_edited: str | None = None
     story_persona_edited: str | None = None
@@ -193,6 +194,7 @@ def render() -> SidebarState:
     st.sidebar.header("Pipeline toggles")
     rag_enabled = st.sidebar.toggle("RAG", value=True)
     mood_enabled = st.sidebar.toggle("Mood classification", value=True)
+    eval_enabled = st.sidebar.toggle("Evaluation Mode", value=False)
     rag_top_k = st.sidebar.slider("RAG top-k", 1, 10, 4, 1)
 
     classifier_provider: str | None = None
@@ -237,6 +239,7 @@ def render() -> SidebarState:
         max_tokens=max_tokens,
         rag_enabled=rag_enabled,
         mood_enabled=mood_enabled,
+        eval_enabled=eval_enabled,
         rag_top_k=rag_top_k,
         classifier_provider=classifier_provider,
         classifier_model=classifier_model,

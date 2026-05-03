@@ -2,11 +2,13 @@
 
 Compares character-driven LLM replies across selected provider+model pairs,
 with full visibility into RAG retrievals, mood classification, the assembled
-prompt, and per-model reasoning content.
+prompt, per-model reasoning content, and optional evaluation scores.
 """
 
 from __future__ import annotations
 
+import json
+import uuid
 import streamlit as st
 
 from components.comparison import THINKING_MODE_BADGES
@@ -18,6 +20,10 @@ from components.panes import (
 )
 from components.sidebar import render as render_sidebar
 from playground import mood as mood_mod
+from playground.evaluation import EvaluationEngine, SessionEvaluation, TurnEvaluation
+from playground.eval_db import (
+    init_db, save_turn_evaluation, check_db_available, get_character_stats
+)
 from playground.prompt_assembly import assemble
 from playground.rag import retrieve
 from playground.runner import ProviderSelection, run_parallel
@@ -36,6 +42,8 @@ def _ensure_session_defaults(n_columns: int) -> None:
         st.session_state["history"].append([])
     if "last_user_message" not in st.session_state:
         st.session_state["last_user_message"] = ""
+    if "session_eval" not in st.session_state:
+        st.session_state["session_eval"] = None
 
 
 def _build_selections(state, key_lookup: dict[str, str]) -> list[ProviderSelection]:
@@ -332,6 +340,9 @@ def _render_story_chat(state, n_cols: int) -> None:
                 rag_pane(last_rag)
                 if i < len(last_assembled):
                     assembled_prompt_pane(last_assembled[i])
+                # Display evaluation results if enabled
+                if state.eval_enabled and st.session_state.get("session_eval"):
+                    _render_evaluation_pane(i, state)
 
     user_msg = st.chat_input(
         f"Talk to {state.character.name} about “{ss.user_goal}”."
@@ -358,15 +369,186 @@ def _render_story_chat(state, n_cols: int) -> None:
                 st.session_state["history"][i].append(
                     {"role": "assistant", "content": result.text}
                 )
+                # Run evaluation if enabled
+                if state.eval_enabled and state.character:
+                    engine = EvaluationEngine(character_id=state.character.id, enable_eval=True)
+                    # Calculate turn number for this column
+                    user_msgs = [m for m in st.session_state["history"][i] if m["role"] == "user"]
+                    turn_num = len(user_msgs)
+                    # Get prior turn for this model
+                    prior_turn = None
+                    if st.session_state.get("session_eval") and st.session_state["session_eval"].turn_evals:
+                        model_turns = [t for t in st.session_state["session_eval"].turn_evals 
+                                      if t.model_name == state.selected_models[i][1]]
+                        if model_turns:
+                            prior_turn = model_turns[-1]
+                    # Evaluate turn
+                    turn_eval = engine.evaluate_turn(
+                        turn_num=turn_num,
+                        user_msg=user_msg.strip(),
+                        assistant_reply=result.text,
+                        model_name=state.selected_models[i][1],
+                        prior_turn=prior_turn
+                    )
+                    # Initialize session eval if not present
+                    if st.session_state.get("session_eval") is None:
+                        session_id = str(uuid.uuid4())
+                        st.session_state["session_eval"] = SessionEvaluation(
+                            session_id=session_id,
+                            character_id=state.character.id
+                        )
+                    st.session_state["session_eval"].turn_evals.append(turn_eval)
+                    
+                    # Save to database if available (otherwise stays in session state)
+                    if st.session_state.get("db_initialized"):
+                        save_turn_evaluation(
+                            turn_eval,
+                            st.session_state["session_eval"].session_id,
+                            tenant_id="default"
+                        )
         st.rerun()
 
     if last and last.get("mood"):
         st.divider()
         mood_panel(last["mood"])
 
+    # Session-level evaluation summary (if enabled)
+    if state.eval_enabled and st.session_state.get("session_eval"):
+        _render_session_evaluation(state)
+
+
+def _render_evaluation_pane(col_index: int, state) -> None:
+    """Render evaluation results for a specific model column."""
+    session_eval = st.session_state.get("session_eval")
+    if not session_eval or not session_eval.turn_evals:
+        return
+    
+    # Get model name for this column
+    if col_index >= len(state.selected_models):
+        return
+    model_name = state.selected_models[col_index][1]
+    
+    # Find turn evaluations for this model
+    model_turns = [t for t in session_eval.turn_evals if t.model_name == model_name]
+    if not model_turns:
+        return
+    
+    # Get the latest turn for this model
+    turn_eval = model_turns[-1]
+    
+    with st.expander("📊 Evaluation", expanded=False):
+        # Auto checks
+        st.caption("**Auto Checks**")
+        checks = turn_eval.auto_checks
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Words", checks.get("word_count", 0))
+        col2.metric("Sentences", checks.get("sentence_count", 0))
+        col3.metric("Questions", turn_eval.assistant_reply.count("?"))
+        
+        if checks.get("banned_hits", 0) > 0:
+            st.error(f"D1: {checks['banned_hits']} banned hits")
+        if checks.get("time_drift_hits", 0) > 0:
+            st.error(f"D2: Time anchor drift detected")
+        
+        # Dimension scores
+        st.caption("**Dimension Scores**")
+        dims = turn_eval.dim_scores
+        for dim in ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]:
+            if dim in dims:
+                score = dims[dim]
+                if score == "n/a":
+                    st.text(f"{dim}: n/a")
+                else:
+                    color = "🟢" if score == 2 else "🟡" if score == 1 else "🔴"
+                    st.text(f"{color} {dim}: {score}/2")
+        
+        # Pattern hits
+        if turn_eval.pattern_hits:
+            st.caption("**Pattern Hits**")
+            for pattern in turn_eval.pattern_hits:
+                st.warning(f"⚠️ {pattern}")
+        
+        # Total score
+        st.metric("Turn Score", f"{turn_eval.total_score}/16")
+
+
+def _render_session_evaluation(state) -> None:
+    """Render session-level evaluation summary."""
+    session_eval = st.session_state.get("session_eval")
+    if not session_eval or not session_eval.turn_evals:
+        return
+    
+    st.divider()
+    with st.container(border=True):
+        st.subheader("📈 Session Evaluation Summary")
+        
+        # Session totals
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Session Total", f"{session_eval.session_total()}/48")
+        col2.metric("Turns Evaluated", len(session_eval.turn_evals))
+        col3.metric("Avg Score", f"{session_eval.session_total() / max(len(session_eval.turn_evals), 1):.1f}/16")
+        
+        # Database status
+        db_available = st.session_state.get("db_initialized", False)
+        col4.metric("Storage", "📊 DB" if db_available else "📋 Local")
+        
+        # Dimension averages
+        st.caption("**Dimension Averages**")
+        avgs = session_eval.dimension_averages()
+        cols = st.columns(4)
+        for i, (dim, avg) in enumerate(avgs.items()):
+            cols[i % 4].metric(dim, f"{avg:.1f}")
+        
+        # Pattern summary
+        pattern_sum = session_eval.pattern_summary()
+        if pattern_sum:
+            st.caption("**Pattern Hits Summary**")
+            for pattern, count in pattern_sum.items():
+                st.warning(f"⚠️ {pattern}: {count} time(s)")
+        
+        # Character stats from DB (if available)
+        if db_available and state.character:
+            stats = get_character_stats(state.character.id)
+            if stats and stats.get("total_turns", 0) > 0:
+                st.caption("**Historical Stats (from DB)**")
+                h_col1, h_col2 = st.columns(2)
+                h_col1.metric("Total DB Turns", stats.get("total_turns", 0))
+                h_col2.metric("Historical Avg Score", f"{stats.get('avg_score', 0):.1f}")
+        
+        # Export button
+        if st.button("📥 Export Evaluation Data"):
+            eval_data = {
+                "session_id": session_eval.session_id,
+                "character_id": session_eval.character_id,
+                "turn_evals": [
+                    {
+                        "turn_num": t.turn_num,
+                        "model_name": t.model_name,
+                        "dim_scores": t.dim_scores,
+                        "pattern_hits": t.pattern_hits,
+                        "total_score": t.total_score,
+                        "auto_checks": t.auto_checks
+                    } for t in session_eval.turn_evals
+                ]
+            }
+            st.download_button(
+                label="Download JSON",
+                data=json.dumps(eval_data, indent=2),
+                file_name=f"evaluation_{session_eval.character_id}.json",
+                mime="application/json"
+            )
+
 
 def main() -> None:
     state = render_sidebar()
+
+    # Initialize database if available
+    if "db_initialized" not in st.session_state:
+        st.session_state["db_initialized"] = init_db()
+        if st.session_state["db_initialized"]:
+            st.sidebar.success("📊 Database connected (Neon)")
+        else:
+            st.sidebar.info("📊 Using local session storage")
 
     st.title("Waveparticle Playground")
 
